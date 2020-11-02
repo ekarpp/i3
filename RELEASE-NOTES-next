@@ -30,6 +30,7 @@ working. Please reach out to us in that case!
   • allow ppt values in move direction and move position commands
   • i3bar: add coordinates relative to the current output in i3bar click events
   • i3bar: add “nonprimary” output option
+  • i3-nagbar: position bar by default on current monitor
 
  ┌────────────────────────────┐
  │ Bugfixes                   │
