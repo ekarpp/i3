@@ -269,7 +269,7 @@ static int handle_expose(xcb_connection_t *conn, xcb_expose_event_t *event) {
  * Return the position and size the i3-nagbar window should use.
  * This will be the primary output or a fallback if it cannot be determined.
  */
-static xcb_rectangle_t get_window_position(void) {
+static xcb_rectangle_t get_window_position(bool position_on_primary) {
     /* Default values if we cannot determine the primary output or its CRTC info. */
     xcb_rectangle_t result = (xcb_rectangle_t){50, 50, 500, font.height + 2 * MSG_PADDING + BAR_BORDER};
 
@@ -278,6 +278,10 @@ static xcb_rectangle_t get_window_position(void) {
 
     xcb_randr_get_output_primary_reply_t *primary = NULL;
     xcb_randr_get_screen_resources_current_reply_t *res = NULL;
+
+    xcb_get_input_focus_reply_t *input_focus = NULL;
+    xcb_get_geometry_reply_t *geometry = NULL;
+    xcb_translate_coordinates_reply_t *coordinates = NULL;
 
     if ((primary = xcb_randr_get_output_primary_reply(conn, pcookie, NULL)) == NULL) {
         LOG("Could not determine the primary output.\n");
@@ -316,9 +320,44 @@ static xcb_rectangle_t get_window_position(void) {
 
     result.x = crtc->x;
     result.y = crtc->y;
+
+    if (!position_on_primary) {
+        // To avoid the input window disappearing while determining its position
+        xcb_grab_server(conn);
+
+        input_focus = xcb_get_input_focus_reply(conn, xcb_get_input_focus(conn), NULL);
+        if (input_focus == NULL || input_focus->focus == XCB_NONE) {
+            DLOG("Failed to receive the current input focus or no window has the input focus right now.\n");
+            goto free_resources;
+        }
+
+        geometry = xcb_get_geometry_reply(conn, xcb_get_geometry(conn, input_focus->focus), NULL);
+        if (geometry == NULL) {
+            DLOG("Failed to received window geometry.\n");
+            goto free_resources;
+        }
+
+        coordinates = xcb_translate_coordinates_reply(
+            conn, xcb_translate_coordinates(conn, input_focus->focus, root, geometry->x, geometry->y), NULL);
+
+        if (coordinates == NULL) {
+            DLOG("Failed to translate coordinates.\n");
+            goto free_resources;
+        }
+
+        result.x += coordinates->dst_x;
+        result.y += coordinates->dst_y;
+    }
+
     goto free_resources;
 
 free_resources:
+    xcb_ungrab_server(conn);
+
+    free(input_focus);
+    free(coordinates);
+    free(geometry);
+
     free(res);
     free(primary);
     return result;
@@ -360,6 +399,7 @@ int main(int argc, char *argv[]) {
 
     argv0 = argv[0];
 
+    bool position_on_primary = false;
     char *pattern = sstrdup("pango:monospace 8");
     int o, option_index = 0;
     enum { TYPE_ERROR = 0,
@@ -373,9 +413,10 @@ int main(int argc, char *argv[]) {
         {"help", no_argument, 0, 'h'},
         {"message", required_argument, 0, 'm'},
         {"type", required_argument, 0, 't'},
+        {"primary", no_argument, 0, 'p'},
         {0, 0, 0, 0}};
 
-    char *options_string = "b:B:f:m:t:vh";
+    char *options_string = "b:B:f:m:t:vhp";
 
     prompt = i3string_from_utf8("Please do not run this program.");
 
@@ -399,8 +440,11 @@ int main(int argc, char *argv[]) {
             case 'h':
                 free(pattern);
                 printf("i3-nagbar " I3_VERSION "\n");
-                printf("i3-nagbar [-m <message>] [-b <button> <action>] [-B <button> <action>] [-t warning|error] [-f <font>] [-v]\n");
+                printf("i3-nagbar [-m <message>] [-b <button> <action>] [-B <button> <action>] [-t warning|error] [-f <font>] [-v] [-p]\n");
                 return 0;
+            case 'p':
+                position_on_primary = true;
+                break;
             case 'b':
             case 'B':
                 buttons = srealloc(buttons, sizeof(button_t) * (buttoncnt + 1));
@@ -464,7 +508,7 @@ int main(int argc, char *argv[]) {
         err(EXIT_FAILURE, "pledge");
 #endif
 
-    xcb_rectangle_t win_pos = get_window_position();
+    xcb_rectangle_t win_pos = get_window_position(position_on_primary);
 
     xcb_cursor_context_t *cursor_ctx;
     if (xcb_cursor_context_new(conn, root_screen, &cursor_ctx) < 0) {
